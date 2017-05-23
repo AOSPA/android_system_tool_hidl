@@ -34,6 +34,16 @@
 namespace android {
 
 status_t AST::generateCpp(const std::string &outputPath) const {
+    status_t err = generateCppHeaders(outputPath);
+
+    if (err == OK) {
+        err = generateCppSources(outputPath);
+    }
+
+    return err;
+}
+
+status_t AST::generateCppHeaders(const std::string &outputPath) const {
     status_t err = generateInterfaceHeader(outputPath);
 
     if (err == OK) {
@@ -46,10 +56,6 @@ status_t AST::generateCpp(const std::string &outputPath) const {
 
     if (err == OK) {
         err = generateProxyHeader(outputPath);
-    }
-
-    if (err == OK) {
-        err = generateAllSource(outputPath);
     }
 
     if (err == OK) {
@@ -634,7 +640,9 @@ static void wrapPassthroughArg(Formatter &out,
         out << wrappedName
             << " = "
             << iface.fqName().cppName()
-            << "::castFrom(::android::hardware::details::wrapPassthrough("
+            << "::castFrom(::android::hardware::details::wrapPassthrough<"
+            << iface.fqName().cppName()
+            << ">("
             << name << "));\n";
         out.sIf(wrappedName + " == nullptr", [&] {
             // Fatal error. Happens when the BsFoo class is not found in the binary
@@ -688,7 +696,10 @@ status_t AST::generatePassthroughMethod(Formatter &out,
     out << "auto _hidl_return = ";
 
     if (method->isOneway()) {
-        out << "addOnewayTask([this, &_hidl_error";
+        out << "addOnewayTask([mImpl = this->mImpl, "
+               "mEnableInstrumentation = this->mEnableInstrumentation, "
+               "mInstrumentationCallbacks = this->mInstrumentationCallbacks, "
+               "&_hidl_error";
         for (const auto &arg : method->args()) {
             out << ", "
                 << (arg->type().isInterface() ? "_hidl_wrapped_" : "")
@@ -696,7 +707,6 @@ status_t AST::generatePassthroughMethod(Formatter &out,
         }
         out << "] {\n";
         out.indent();
-        out << "this->";
     }
 
     out << "mImpl->"
@@ -993,7 +1003,7 @@ status_t AST::generateProxyHeader(const std::string &outputPath) const {
     return OK;
 }
 
-status_t AST::generateAllSource(const std::string &outputPath) const {
+status_t AST::generateCppSources(const std::string &outputPath) const {
 
     std::string path = outputPath;
     path.append(mCoordinator->convertPackageRootToPath(mPackage));
@@ -1087,7 +1097,7 @@ status_t AST::generateAllSource(const std::string &outputPath) const {
                 out.indent([&] {
                     out << "return new "
                         << iface->getStubName()
-                        << "(reinterpret_cast<"
+                        << "(static_cast<"
                         << iface->localName()
                         << " *>(iIntf));\n";
                 });
@@ -1103,7 +1113,7 @@ status_t AST::generateAllSource(const std::string &outputPath) const {
                 out.indent([&] {
                     out << "return new "
                         << iface->getPassthroughName()
-                        << "(reinterpret_cast<"
+                        << "(static_cast<"
                         << iface->localName()
                         << " *>(iIntf));\n";
                 });
@@ -1466,6 +1476,10 @@ status_t AST::generateStubSource(
         << "\") { \n";
     out.indent();
     out << "_hidl_mImpl = _hidl_impl;\n";
+    out << "auto prio = ::android::hardware::details::gServicePrioMap.get("
+        << "_hidl_impl, {SCHED_NORMAL, 0});\n";
+    out << "mSchedPolicy = prio.sched_policy;\n";
+    out << "mSchedPriority = prio.prio;\n";
     out.unindent();
 
     out.unindent();
