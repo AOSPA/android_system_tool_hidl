@@ -476,10 +476,6 @@ void AST::generatePassthroughMethod(Formatter& out, const Method* method, const 
     const bool returnsValue = !method->results().empty();
     const NamedReference<Type>* elidedReturn = method->canElideCallback();
 
-    if (returnsValue && elidedReturn == nullptr) {
-        generateCheckNonNull(out, "_hidl_cb");
-    }
-
     generateCppInstrumentationCall(
             out,
             InstrumentationEvent::PASSTHROUGH_ENTRY,
@@ -698,6 +694,15 @@ void AST::generateStubHeader(Formatter& out) const {
     generateCppTag(out, "android::hardware::details::bnhw_tag");
 
     out << "::android::sp<" << iface->localName() << "> getImpl() { return _hidl_mImpl; }\n";
+
+    // Because the Bn class hierarchy always inherits from BnHwBase (and no other parent classes)
+    // and also no HIDL-specific things exist in the base binder classes, whenever we want to do
+    // C++ HIDL things with a binder, we only have the choice to convert it into a BnHwBase.
+    // Other hwbinder C++ class hierarchies (namely the one used for Java binder) will still
+    // be libhwbinder binders, but they are not instances of BnHwBase.
+    if (isIBase()) {
+        out << "bool checkSubclass(const void* subclassID) const;\n";
+    }
 
     generateMethods(out,
                     [&](const Method* method, const Interface*) {
@@ -953,16 +958,6 @@ void AST::generateCppSource(Formatter& out) const {
     enterLeaveNamespace(out, false /* enter */);
 }
 
-void AST::generateCheckNonNull(Formatter &out, const std::string &nonNull) {
-    out.sIf(nonNull + " == nullptr", [&] {
-        out << "return ::android::hardware::Status::fromExceptionCode(\n";
-        out.indent(2, [&] {
-            out << "::android::hardware::Status::EX_ILLEGAL_ARGUMENT,\n"
-                << "\"Null synchronous callback passed.\");\n";
-        });
-    }).endl().endl();
-}
-
 void AST::generateTypeSource(Formatter& out, const std::string& ifaceName) const {
     mRootScope.emitTypeDefinitions(out, ifaceName);
 }
@@ -1097,9 +1092,7 @@ void AST::generateStaticProxyMethodSource(Formatter& out, const std::string& kla
 
     const bool returnsValue = !method->results().empty();
     const NamedReference<Type>* elidedReturn = method->canElideCallback();
-    if (returnsValue && elidedReturn == nullptr) {
-        generateCheckNonNull(out, "_hidl_cb");
-    }
+    const bool hasCallback = returnsValue && elidedReturn == nullptr;
 
     generateCppInstrumentationCall(
             out,
@@ -1110,10 +1103,13 @@ void AST::generateStaticProxyMethodSource(Formatter& out, const std::string& kla
     out << "::android::hardware::Parcel _hidl_data;\n";
     out << "::android::hardware::Parcel _hidl_reply;\n";
     out << "::android::status_t _hidl_err;\n";
+    out << "::android::status_t _hidl_transact_err;\n";
     out << "::android::hardware::Status _hidl_status;\n\n";
 
-    declareCppReaderLocals(
-            out, method->results(), true /* forResults */);
+    if (!hasCallback) {
+        declareCppReaderLocals(
+                out, method->results(), true /* forResults */);
+    }
 
     out << "_hidl_err = _hidl_data.writeInterfaceToken(";
     out << klassName;
@@ -1152,7 +1148,7 @@ void AST::generateStaticProxyMethodSource(Formatter& out, const std::string& kla
         // Start binder threadpool to handle incoming transactions
         out << "::android::hardware::ProcessState::self()->startThreadPool();\n";
     }
-    out << "_hidl_err = ::android::hardware::IInterface::asBinder(_hidl_this)->transact("
+    out << "_hidl_transact_err = ::android::hardware::IInterface::asBinder(_hidl_this)->transact("
         << method->getSerialId()
         << " /* "
         << method->name()
@@ -1160,16 +1156,36 @@ void AST::generateStaticProxyMethodSource(Formatter& out, const std::string& kla
 
     if (method->isOneway()) {
         out << ", " << Interface::FLAG_ONE_WAY->cppValue();
+    } else {
+        out << ", 0";
     }
-    out << ");\n";
 
-    out << "if (_hidl_err != ::android::OK) { goto _hidl_error; }\n\n";
+    if (hasCallback) {
+        out << ", [&] (::android::hardware::Parcel& _hidl_reply) {\n";
+        out.indent();
+        declareCppReaderLocals(
+                out, method->results(), true /* forResults */);
+        out.endl();
+    } else {
+        out << ");\n";
+        out << "if (_hidl_transact_err != ::android::OK) \n";
+        out.block([&] {
+            out << "_hidl_err = _hidl_transact_err;\n";
+            out << "goto _hidl_error;\n";
+        }).endl().endl();
+    }
 
     if (!method->isOneway()) {
-        out << "_hidl_err = ::android::hardware::readFromParcel(&_hidl_status, _hidl_reply);\n";
-        out << "if (_hidl_err != ::android::OK) { goto _hidl_error; }\n\n";
-        out << "if (!_hidl_status.isOk()) { return _hidl_status; }\n\n";
+        Type::ErrorMode errorMode = hasCallback ? Type::ErrorMode_ReturnNothing : Type::ErrorMode_Goto;
 
+        out << "_hidl_err = ::android::hardware::readFromParcel(&_hidl_status, _hidl_reply);\n";
+        Type::handleError(out, errorMode);
+
+        if (hasCallback) {
+            out << "if (!_hidl_status.isOk()) { return; }\n\n";
+        } else {
+            out << "if (!_hidl_status.isOk()) { return _hidl_status; }\n\n";
+        }
 
         // First DFS: write all buffers and resolve pointers for parent
         for (const auto &arg : method->results()) {
@@ -1179,7 +1195,7 @@ void AST::generateStaticProxyMethodSource(Formatter& out, const std::string& kla
                     false /* parcelObjIsPointer */,
                     arg,
                     true /* reader */,
-                    Type::ErrorMode_Goto,
+                    errorMode,
                     true /* addPrefixToName */);
         }
 
@@ -1191,7 +1207,7 @@ void AST::generateStaticProxyMethodSource(Formatter& out, const std::string& kla
                     false /* parcelObjIsPointer */,
                     arg,
                     true /* reader */,
-                    Type::ErrorMode_Goto,
+                    errorMode,
                     true /* addPrefixToName */);
         }
 
@@ -1215,13 +1231,22 @@ void AST::generateStaticProxyMethodSource(Formatter& out, const std::string& kla
             method,
             superInterface);
 
+    if (hasCallback) {
+        out.unindent();
+        out << "});\n";
+        out << "if (_hidl_transact_err != ::android::OK) ";
+        out.block([&] {
+            out << "_hidl_err = _hidl_transact_err;\n";
+            out << "goto _hidl_error;\n";
+        }).endl().endl();
+        out << "if (!_hidl_status.isOk()) { return _hidl_status; }\n";
+    }
+
     if (elidedReturn != nullptr) {
-        out << "_hidl_status.setFromStatusT(_hidl_err);\n";
         out << "return ::android::hardware::Return<";
         out << elidedReturn->type().getCppResultType()
             << ">(_hidl_out_" << elidedReturn->name() << ");\n\n";
     } else {
-        out << "_hidl_status.setFromStatusT(_hidl_err);\n";
         out << "return ::android::hardware::Return<void>();\n\n";
     }
 
@@ -1345,6 +1370,11 @@ void AST::generateStubSource(Formatter& out, const Interface* iface) const {
        })
             .endl()
             .endl();
+
+    if (isIBase()) {
+        out << "bool " << klassName << "::checkSubclass(const void* subclassID) const ";
+        out.block([&] { out << "return subclassID == " << interfaceName << "::descriptor;\n"; });
+    }
 
     generateMethods(out,
                     [&](const Method* method, const Interface* superInterface) {
@@ -1707,8 +1737,6 @@ void AST::generatePassthroughHeader(Formatter& out) const {
 
     const std::string klassName = iface->getPassthroughName();
 
-    bool supportOneway = iface->hasOnewayMethods();
-
     const std::string guard = makeHeaderGuard(klassName);
 
     out << "#ifndef " << guard << "\n";
@@ -1726,9 +1754,7 @@ void AST::generatePassthroughHeader(Formatter& out) const {
     out << "\n";
 
     out << "#include <hidl/HidlPassthroughSupport.h>\n";
-    if (supportOneway) {
-        out << "#include <hidl/TaskRunner.h>\n";
-    }
+    out << "#include <hidl/TaskRunner.h>\n";
 
     enterLeaveNamespace(out, true /* enter */);
     out << "\n";
@@ -1758,14 +1784,12 @@ void AST::generatePassthroughHeader(Formatter& out) const {
     out.indent();
     out << "const ::android::sp<" << iface->localName() << "> mImpl;\n";
 
-    if (supportOneway) {
-        out << "::android::hardware::details::TaskRunner mOnewayQueue;\n";
+    out << "::android::hardware::details::TaskRunner mOnewayQueue;\n";
 
-        out << "\n";
+    out << "\n";
 
-        out << "::android::hardware::Return<void> addOnewayTask("
-               "std::function<void(void)>);\n\n";
-    }
+    out << "::android::hardware::Return<void> addOnewayTask("
+           "std::function<void(void)>);\n\n";
 
     out.unindent();
 
@@ -1837,48 +1861,33 @@ void AST::generatePassthroughSource(Formatter& out) const {
 
     const std::string klassName = iface->getPassthroughName();
 
-    out << klassName
-        << "::"
-        << klassName
-        << "(const ::android::sp<"
-        << iface->fullName()
-        << "> impl) : ::android::hardware::details::HidlInstrumentor(\""
-        << mPackage.string()
-        << "\", \""
-        << iface->localName()
-        << "\"), mImpl(impl) {";
-    if (iface->hasOnewayMethods()) {
-        out << "\n";
-        out.indent([&] {
-            out << "mOnewayQueue.start(3000 /* similar limit to binderized */);\n";
-        });
-    }
+    out << klassName << "::" << klassName << "(const ::android::sp<" << iface->fullName()
+        << "> impl) : ::android::hardware::details::HidlInstrumentor(\"" << mPackage.string()
+        << "\", \"" << iface->localName() << "\"), mImpl(impl) {\n";
+
+    out.indent([&] { out << "mOnewayQueue.start(3000 /* similar limit to binderized */);\n"; });
+
     out << "}\n\n";
 
-    if (iface->hasOnewayMethods()) {
-        out << "::android::hardware::Return<void> "
-            << klassName
-            << "::addOnewayTask(std::function<void(void)> fun) {\n";
-        out.indent();
-        out << "if (!mOnewayQueue.push(fun)) {\n";
-        out.indent();
-        out << "return ::android::hardware::Status::fromExceptionCode(\n";
-        out.indent();
-        out.indent();
-        out << "::android::hardware::Status::EX_TRANSACTION_FAILED,\n"
-            << "\"Passthrough oneway function queue exceeds maximum size.\");\n";
-        out.unindent();
-        out.unindent();
-        out.unindent();
-        out << "}\n";
+    out << "::android::hardware::Return<void> " << klassName
+        << "::addOnewayTask(std::function<void(void)> fun) {\n";
+    out.indent();
+    out << "if (!mOnewayQueue.push(fun)) {\n";
+    out.indent();
+    out << "return ::android::hardware::Status::fromExceptionCode(\n";
+    out.indent();
+    out.indent();
+    out << "::android::hardware::Status::EX_TRANSACTION_FAILED,\n"
+        << "\"Passthrough oneway function queue exceeds maximum size.\");\n";
+    out.unindent();
+    out.unindent();
+    out.unindent();
+    out << "}\n";
 
-        out << "return ::android::hardware::Status();\n";
+    out << "return ::android::hardware::Status();\n";
 
-        out.unindent();
-        out << "}\n\n";
-
-
-    }
+    out.unindent();
+    out << "}\n\n";
 }
 
 void AST::generateCppAtraceCall(Formatter &out,

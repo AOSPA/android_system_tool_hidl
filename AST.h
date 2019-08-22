@@ -144,6 +144,7 @@ struct AST {
     void generateCppAdapterSource(Formatter& out) const;
 
     void generateJava(Formatter& out, const std::string& limitToType) const;
+    void generateJavaImpl(Formatter& out) const;
     void generateJavaTypes(Formatter& out, const std::string& limitToType) const;
 
     void generateVts(Formatter& out) const;
@@ -255,8 +256,6 @@ struct AST {
     std::string makeHeaderGuard(const std::string &baseName,
                                 bool indicateGenerated = true) const;
     void enterLeaveNamespace(Formatter &out, bool enter) const;
-
-    static void generateCheckNonNull(Formatter &out, const std::string &nonNull);
 
     void generateTypeSource(Formatter& out, const std::string& ifaceName) const;
 

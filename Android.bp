@@ -108,6 +108,7 @@ cc_library_host_shared {
         "generateCppImpl.cpp",
         "generateDependencies.cpp",
         "generateJava.cpp",
+        "generateJavaImpl.cpp",
         "generateVts.cpp",
         "hidl-gen_y.yy",
         "hidl-gen_l.ll",
@@ -123,9 +124,14 @@ cc_library_host_shared {
     ],
     export_shared_lib_headers: [
         "libbase",
+        "libhidl-gen-hash",
         "libhidl-gen-utils",
     ],
     export_include_dirs: ["."], // for tests
+    yacc: {
+        gen_location_hh: true,
+        gen_position_hh: true,
+    }
 }
 
 cc_binary_host {

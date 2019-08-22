@@ -525,7 +525,7 @@ void Type::emitJavaFieldReaderWriter(
     CHECK(!"Should not be here") << typeName();
 }
 
-void Type::handleError(Formatter &out, ErrorMode mode) const {
+void Type::handleError(Formatter &out, ErrorMode mode) {
     switch (mode) {
         case ErrorMode_Ignore:
         {
@@ -549,6 +549,16 @@ void Type::handleError(Formatter &out, ErrorMode mode) const {
         {
             out << "if (_hidl_err != ::android::OK) { return _hidl_err; }\n\n";
             break;
+        }
+
+        case ErrorMode_ReturnNothing:
+        {
+            out << "if (_hidl_err != ::android::OK) { return; }\n\n";
+            break;
+        }
+        default:
+        {
+            LOG(FATAL) << "Should not be here";
         }
     }
 }
@@ -748,7 +758,7 @@ bool Type::deepContainsPointer(std::unordered_set<const Type*>* /* visited */) c
 
 void Type::getAlignmentAndSize(
         size_t * /* align */, size_t * /* size */) const {
-    CHECK(!"Should not be here.");
+    CHECK(!"Should not be here.") << typeName();
 }
 
 void Type::appendToExportedTypesVector(

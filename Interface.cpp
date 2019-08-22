@@ -273,7 +273,7 @@ bool Interface::fillDescriptorChainMethod(Method *method) const {
                 }
             });
             out << ");\n";
-            out << "return ::android::hardware::Void();";
+            out << "return ::android::hardware::Void();\n";
         } } }, /* cppImpl */
         { { IMPL_INTERFACE, [this](auto &out) {
             std::vector<const Interface *> chain = typeChain();
@@ -957,22 +957,6 @@ void Interface::emitVtsAttributeType(Formatter& out) const {
         << "predefined_type: \""
         << fullName()
         << "\"\n";
-}
-
-bool Interface::hasOnewayMethods() const {
-    for (auto const &method : methods()) {
-        if (method->isOneway()) {
-            return true;
-        }
-    }
-
-    const Interface* superClass = superType();
-
-    if (superClass != nullptr) {
-        return superClass->hasOnewayMethods();
-    }
-
-    return false;
 }
 
 bool Interface::deepIsJavaCompatible(std::unordered_set<const Type*>* visited) const {
