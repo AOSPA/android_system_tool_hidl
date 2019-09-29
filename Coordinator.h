@@ -114,6 +114,9 @@ struct Coordinator {
             const FQName &package,
             std::vector<std::string> *fileNames) const;
 
+    // Returns true if the package points to a directory that exists
+    status_t packageExists(const FQName& package, bool* result) const;
+
     status_t appendPackageInterfacesToVector(
             const FQName &package,
             std::vector<FQName> *packageInterfaces) const;
@@ -140,6 +143,12 @@ struct Coordinator {
     // options is the same format as optstring for getopt
     void parseOptions(int argc, char** argv, const std::string& options,
                       const HandleArg& handleArg);
+
+    static void emitOptionsUsageString(Formatter& out);
+    static void emitOptionsDetailString(Formatter& out);
+
+    // Returns path relative to mRootPath
+    std::string makeRelative(const std::string& filename) const;
 
   private:
     static bool MakeParentHierarchy(const std::string &path);

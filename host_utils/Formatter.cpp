@@ -19,16 +19,18 @@
 #include <assert.h>
 
 #include <android-base/logging.h>
+#include <string>
+#include <vector>
 
 namespace android {
 
-Formatter::Formatter() : mFile(nullptr /* invalid */), mIndentDepth(0), mAtStartOfLine(true) {}
+Formatter::Formatter() : mFile(nullptr /* invalid */), mIndentDepth(0), mCurrentPosition(0) {}
 
 Formatter::Formatter(FILE* file, size_t spacesPerIndent)
     : mFile(file == nullptr ? stdout : file),
       mIndentDepth(0),
       mSpacesPerIndent(spacesPerIndent),
-      mAtStartOfLine(true) {}
+      mCurrentPosition(0) {}
 
 Formatter::~Formatter() {
     if (mFile != stdout) {
@@ -115,38 +117,85 @@ Formatter& Formatter::sWhile(const std::string& cond, const std::function<void(v
     return this->block(block);
 }
 
-Formatter &Formatter::operator<<(const std::string &out) {
+Formatter& Formatter::operator<<(const std::string& out) {
     const size_t len = out.length();
     size_t start = 0;
     while (start < len) {
         size_t pos = out.find('\n', start);
 
         if (pos == std::string::npos) {
-            if (mAtStartOfLine) {
-                fprintf(mFile, "%*s", (int)(mSpacesPerIndent * mIndentDepth), "");
+            if (mCurrentPosition == 0) {
+                fprintf(mFile, "%*s", (int)(getIndentation()), "");
                 fprintf(mFile, "%s", mLinePrefix.c_str());
-                mAtStartOfLine = false;
+                mCurrentPosition = getIndentation() + mLinePrefix.size();
             }
 
-            output(out.substr(start));
+            std::string sub = out.substr(start);
+            output(sub);
+            mCurrentPosition += sub.size();
             break;
         }
 
-        if (mAtStartOfLine && (pos > start || !mLinePrefix.empty())) {
-            fprintf(mFile, "%*s", (int)(mSpacesPerIndent * mIndentDepth), "");
+        if (mCurrentPosition == 0 && (pos > start || !mLinePrefix.empty())) {
+            fprintf(mFile, "%*s", (int)(getIndentation()), "");
             fprintf(mFile, "%s", mLinePrefix.c_str());
+            mCurrentPosition = getIndentation() + mLinePrefix.size();
         }
 
         if (pos == start) {
             fprintf(mFile, "\n");
-            mAtStartOfLine = true;
+            mCurrentPosition = 0;
         } else if (pos > start) {
             output(out.substr(start, pos - start + 1));
-            mAtStartOfLine = true;
+            mCurrentPosition = 0;
         }
 
         start = pos + 1;
     }
+
+    return *this;
+}
+
+void Formatter::printBlock(const WrappedOutput::Block& block, size_t lineLength) {
+    size_t lineStart = mCurrentPosition ?: (getIndentation() + mLinePrefix.size());
+    size_t blockSize = block.computeSize(false);
+    if (blockSize + lineStart < lineLength) {
+        block.print(*this, false);
+        return;
+    }
+
+    // Everything will not fit on this line. Try to fit it on the next line.
+    blockSize = block.computeSize(true);
+    if ((blockSize + getIndentation() + mSpacesPerIndent + mLinePrefix.size()) < lineLength) {
+        *this << "\n";
+        indent();
+
+        block.print(*this, true);
+
+        unindent();
+        return;
+    }
+
+    if (!block.content.empty()) {
+        // Doesn't have subblocks. This means that the block itself is too big.
+        // Have to print it out.
+        *this << "\n";
+        indent();
+
+        block.print(*this, true);
+
+        unindent();
+        return;
+    }
+
+    // Everything will not fit on this line. Go through all the children
+    for (const WrappedOutput::Block& subBlock : block.blocks) {
+        printBlock(subBlock, lineLength);
+    }
+}
+
+Formatter& Formatter::operator<<(const WrappedOutput& wrappedOutput) {
+    printBlock(wrappedOutput.mRootBlock, wrappedOutput.mLineLength);
 
     return *this;
 }
@@ -183,18 +232,105 @@ FORMATTER_INPUT_CHAR(unsigned char);
 
 #undef FORMATTER_INPUT_CHAR
 
-void Formatter::setNamespace(const std::string &space) {
-    mSpace = space;
-}
-
 bool Formatter::isValid() const {
     return mFile != nullptr;
+}
+
+size_t Formatter::getIndentation() const {
+    return mSpacesPerIndent * mIndentDepth;
 }
 
 void Formatter::output(const std::string &text) const {
     CHECK(isValid());
 
     fprintf(mFile, "%s", text.c_str());
+}
+
+WrappedOutput::Block::Block(const std::string& content, Block* const parent)
+    : content(content), parent(parent) {}
+
+size_t WrappedOutput::Block::computeSize(bool wrapped) const {
+    CHECK(content.empty() || blocks.empty());
+
+    // There is a wrap, so the block would not be printed
+    if (printUnlessWrapped && wrapped) return 0;
+
+    size_t size = content.size();
+    for (auto block = blocks.begin(); block != blocks.end(); ++block) {
+        if (block == blocks.begin()) {
+            // Only the first one can be wrapped (since content.empty())
+            size += block->computeSize(wrapped);
+        } else {
+            size += block->computeSize(false);
+        }
+    }
+
+    return size;
+}
+
+void WrappedOutput::Block::print(Formatter& out, bool wrapped) const {
+    CHECK(content.empty() || blocks.empty());
+
+    // There is a wrap, so the block should not be printed
+    if (printUnlessWrapped && wrapped) return;
+
+    out << content;
+    for (auto block = blocks.begin(); block != blocks.end(); ++block) {
+        if (block == blocks.begin()) {
+            // Only the first one can be wrapped (since content.empty())
+            block->print(out, wrapped);
+        } else {
+            block->print(out, false);
+        }
+    }
+}
+
+WrappedOutput::WrappedOutput(size_t lineLength)
+    : mLineLength(lineLength), mRootBlock(Block("", nullptr)) {
+    mCurrentBlock = &mRootBlock;
+}
+
+WrappedOutput& WrappedOutput::operator<<(const std::string& str) {
+    std::vector<Block>& blockVec = mCurrentBlock->blocks;
+    if (!blockVec.empty()) {
+        Block& last = blockVec.back();
+        if (!last.populated && last.blocks.empty()) {
+            last.content += str;
+
+            return *this;
+        }
+    }
+
+    blockVec.emplace_back(str, mCurrentBlock);
+    return *this;
+}
+
+WrappedOutput& WrappedOutput::printUnlessWrapped(const std::string& str) {
+    std::vector<Block>& blockVec = mCurrentBlock->blocks;
+    if (!blockVec.empty()) {
+        blockVec.back().populated = true;
+    }
+
+    blockVec.emplace_back(str, mCurrentBlock);
+    blockVec.back().populated = true;
+    blockVec.back().printUnlessWrapped = true;
+
+    return *this;
+}
+
+void WrappedOutput::group(const std::function<void(void)>& block) {
+    std::vector<Block>& blockVec = mCurrentBlock->blocks;
+    if (!blockVec.empty()) {
+        blockVec.back().populated = true;
+    }
+
+    blockVec.emplace_back("", mCurrentBlock);
+    mCurrentBlock = &blockVec.back();
+
+    block();
+
+    mCurrentBlock->populated = true;
+    mCurrentBlock = mCurrentBlock->parent;
 }
 
 }  // namespace android

@@ -25,10 +25,12 @@
 #include <hidl-util/Formatter.h>
 #include <algorithm>
 #include <iostream>
+#include <string>
 
 namespace android {
 
-Type::Type(Scope* parent) : mParent(parent) {}
+Type::Type(Scope* parent, const std::string& definedName)
+    : mDefinedName(definedName), mParent(parent) {}
 
 Type::~Type() {}
 
@@ -89,6 +91,10 @@ bool Type::isTemplatedType() const {
 }
 
 bool Type::isPointer() const {
+    return false;
+}
+
+bool Type::isFmq() const {
     return false;
 }
 
@@ -369,6 +375,10 @@ const Scope* Type::parent() const {
     return mParent;
 }
 
+const std::string& Type::definedName() const {
+    return mDefinedName;
+}
+
 std::string Type::getCppType(StorageMode, bool) const {
     CHECK(!"Should not be here") << typeName();
     return std::string();
@@ -417,32 +427,6 @@ void Type::emitReaderWriter(
     CHECK(!"Should not be here") << typeName();
 }
 
-void Type::emitResolveReferences(
-        Formatter &,
-        const std::string &,
-        bool,
-        const std::string &,
-        bool,
-        bool,
-        ErrorMode) const {
-    CHECK(!"Should not be here") << typeName();
-}
-
-void Type::emitResolveReferencesEmbedded(
-        Formatter &,
-        size_t,
-        const std::string &,
-        const std::string &,
-        bool,
-        const std::string &,
-        bool,
-        bool,
-        ErrorMode,
-        const std::string &,
-        const std::string &) const {
-    CHECK(!"Should not be here") << typeName();
-}
-
 void Type::emitDump(
         Formatter &out,
         const std::string &streamName,
@@ -468,10 +452,6 @@ void Type::emitJavaDump(
         const std::string &streamName,
         const std::string &name) const {
     out << streamName << ".append(" << name << ");\n";
-}
-
-bool Type::useParentInEmitResolveReferencesEmbedded() const {
-    return needsResolveReferences();
 }
 
 void Type::emitReaderWriterEmbedded(
@@ -627,6 +607,10 @@ void Type::emitReaderWriterEmbeddedForTypeName(
     handleError(out, mode);
 }
 
+void Type::emitHidlDefinition(Formatter&) const {
+    CHECK(!"Should not be here.") << typeName();
+}
+
 void Type::emitTypeDeclarations(Formatter&) const {}
 
 void Type::emitTypeForwardDeclaration(Formatter&) const {}
@@ -648,24 +632,6 @@ bool Type::needsEmbeddedReadWrite() const {
 }
 
 bool Type::resultNeedsDeref() const {
-    return false;
-}
-
-bool Type::needsResolveReferences() const {
-    std::unordered_set<const Type*> visited;
-    return needsResolveReferences(&visited);
-}
-
-bool Type::needsResolveReferences(std::unordered_set<const Type*>* visited) const {
-    // See isJavaCompatible for similar structure.
-    if (visited->find(this) != visited->end()) {
-        return false;
-    }
-    visited->insert(this);
-    return deepNeedsResolveReferences(visited);
-}
-
-bool Type::deepNeedsResolveReferences(std::unordered_set<const Type*>* /* visited */) const {
     return false;
 }
 
@@ -773,7 +739,8 @@ bool Type::isNeverStrongReference() const {
 
 ////////////////////////////////////////
 
-TemplatedType::TemplatedType(Scope* parent) : Type(parent) {}
+TemplatedType::TemplatedType(Scope* parent, const std::string& definedName)
+    : Type(parent, definedName) {}
 
 std::string TemplatedType::typeName() const {
     return templatedTypeName() + " of " + mElementType->typeName();
@@ -785,6 +752,7 @@ void TemplatedType::setElementType(const Reference<Type>& elementType) {
     CHECK(!elementType.isEmptyReference());
 
     mElementType = elementType;
+    mDefinedName = mDefinedName + "<" + mElementType.localName() + ">";
 }
 
 const Type* TemplatedType::getElementType() const {

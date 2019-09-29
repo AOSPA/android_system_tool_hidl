@@ -21,18 +21,33 @@
 #include <hidl-util/Formatter.h>
 
 #include <string>
+#include <vector>
+
+#include "Location.h"
 
 namespace android {
 
+enum class CommentType {
+    // multiline comment that begins with /**
+    DOC_MULTILINE,
+    // begins with /* (used for headers)
+    MULTILINE
+};
+
 struct DocComment {
-    DocComment(const std::string& comment);
+    DocComment(const std::string& comment, const Location& location);
 
     void merge(const DocComment* comment);
 
-    void emit(Formatter& out) const;
+    void emit(Formatter& out, CommentType type = CommentType::DOC_MULTILINE) const;
 
-   private:
-    std::string mComment;
+    const std::vector<std::string>& lines() const { return mLines; }
+
+    const Location& location() const { return mLocation; }
+
+  private:
+    std::vector<std::string> mLines;
+    Location mLocation;
 };
 
 struct DocCommentable {
@@ -43,7 +58,6 @@ struct DocCommentable {
         }
     }
 
-  protected:
     const DocComment* getDocComment() const { return mDocComment; }
 
   private:

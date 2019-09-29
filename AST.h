@@ -34,6 +34,7 @@ namespace android {
 
 struct Coordinator;
 struct ConstantExpression;
+struct DocComment;
 struct EnumValue;
 struct Formatter;
 struct Interface;
@@ -44,11 +45,17 @@ template <class T>
 struct NamedReference;
 struct Type;
 
+struct ImportStatement {
+    FQName fqName;
+    Location location;
+};
+
 struct AST {
     AST(const Coordinator* coordinator, const Hash* fileHash);
 
     bool setPackage(const char *package);
-    bool addImport(const char *import);
+    bool addImport(const char* import, const Location& location);
+    bool addImplicitImport(const FQName& fqName);
 
     // package and version really.
     FQName package() const;
@@ -62,6 +69,8 @@ struct AST {
 
     const std::string& getFilename() const;
     const Hash* getFileHash() const;
+
+    const Coordinator& getCoordinator() const;
 
     // Look up local identifier.
     // It could be plain identifier or enum value as described by lookupEnumValue.
@@ -150,7 +159,11 @@ struct AST {
     void generateVts(Formatter& out) const;
 
     void generateDependencies(Formatter& out) const;
+    void generateInheritanceHierarchy(Formatter& out) const;
 
+    void generateFormattedHidl(Formatter& out) const;
+
+    const std::vector<ImportStatement>& getImportStatements() const;
     void getImportedPackages(std::set<FQName> *importSet) const;
 
     // Run getImportedPackages on this, then run getImportedPackages on
@@ -191,7 +204,8 @@ struct AST {
     // types or Interface base name (e.x. Foo)
     std::string getBaseName() const;
 
-    Scope* getRootScope();
+    Scope* getMutableRootScope();
+    const Scope& getRootScope() const;
 
     static void generateCppPackageInclude(Formatter& out, const FQName& package,
                                           const std::string& klass);
@@ -201,13 +215,36 @@ struct AST {
 
     void addToImportedNamesGranular(const FQName &fqName);
 
-   private:
+    bool addMethod(Method* method, Interface* iface);
+    bool addAllReservedMethodsToInterface(Interface* iface);
+
+    void setHeader(const DocComment* header);
+    const DocComment* getHeader() const;
+
+    // TODO: Clean up all interface usages of unhandled comments and ensure they are attached to the
+    // right element
+    void addUnhandledComment(const DocComment* docComment);
+    const std::vector<const DocComment*> getUnhandledComments() const;
+
+  private:
     const Coordinator* mCoordinator;
     const Hash* mFileHash;
 
     RootScope mRootScope;
 
     FQName mPackage;
+
+    // Header for the file
+    const DocComment* mHeader = nullptr;
+
+    // A list of trailing DocComments.
+    std::vector<const DocComment*> mUnhandledComments;
+
+    // A list of the FQNames present in the import statements
+    std::vector<ImportStatement> mImportStatements;
+
+    // A list of FQNames that are imported implicitly
+    std::vector<FQName> mImplicitImports;
 
     // A set of all external interfaces/types that are _actually_ referenced
     // in this AST, this is a subset of those specified in import statements.
@@ -233,10 +270,16 @@ struct AST {
     // Types keyed by full names defined in this AST.
     std::map<FQName, Type *> mDefinedTypesByFullName;
 
+    // contains all the hidl reserved methods part of this AST
+    std::map<std::string, Method*> mAllReservedMethods;
+
     // used by the parser.
     size_t mSyntaxErrors = 0;
 
     std::set<FQName> mReferencedTypeNames;
+
+    // importFQName will try to import fqName by parsing any file that might contain it
+    bool importFQName(const FQName& fqName);
 
     // Helper functions for lookupType.
     Type* lookupTypeLocally(const FQName& fqName, Scope* scope);
@@ -323,10 +366,6 @@ struct AST {
     void emitCppReaderWriter(Formatter& out, const std::string& parcelObj, bool parcelObjIsPointer,
                              const NamedReference<Type>* arg, bool isReader, Type::ErrorMode mode,
                              bool addPrefixToName) const;
-
-    void emitCppResolveReferences(Formatter& out, const std::string& parcelObj,
-                                  bool parcelObjIsPointer, const NamedReference<Type>* arg,
-                                  bool isReader, Type::ErrorMode mode, bool addPrefixToName) const;
 
     void emitJavaReaderWriter(Formatter& out, const std::string& parcelObj,
                               const NamedReference<Type>* arg, bool isReader,

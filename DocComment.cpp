@@ -20,18 +20,17 @@
 #include <hidl-util/StringHelper.h>
 
 #include <cctype>
-#include <sstream>
+#include <vector>
 
-#include <iostream>
+#include "Location.h"
 
 namespace android {
 
-DocComment::DocComment(const std::string& comment) {
+DocComment::DocComment(const std::string& comment, const Location& location) : mLocation(location) {
     std::vector<std::string> lines = base::Split(base::Trim(comment), "\n");
 
     bool foundFirstLine = false;
 
-    std::ostringstream is;
     for (size_t l = 0; l < lines.size(); l++) {
         const std::string& line = lines[l];
 
@@ -42,25 +41,44 @@ DocComment::DocComment(const std::string& comment) {
         if (idx < line.size() && line[idx] == '*') idx++;
         if (idx < line.size() && line[idx] == ' ') idx++;
 
-        bool isEmptyLine = idx == line.size();
+        const std::string& sanitizedLine = line.substr(idx);
+        int i = sanitizedLine.size();
+        for (; i > 0 && isspace(sanitizedLine[i - 1]); i--)
+            ;
+
+        // Either the size is 0 or everything was whitespace.
+        bool isEmptyLine = i == 0;
 
         foundFirstLine = foundFirstLine || !isEmptyLine;
         if (!foundFirstLine) continue;
 
-        is << line.substr(idx) << "\n";
+        // if isEmptyLine, i == 0 so substr == ""
+        mLines.push_back(sanitizedLine.substr(0, i));
     }
-
-    mComment = is.str();
 }
 
 void DocComment::merge(const DocComment* comment) {
-    mComment = mComment + "\n\n" + comment->mComment;
+    mLines.insert(mLines.end(), 2, "");
+    mLines.insert(mLines.end(), comment->mLines.begin(), comment->mLines.end());
+    mLocation.setLocation(mLocation.begin(), comment->mLocation.end());
 }
 
-void DocComment::emit(Formatter& out) const {
-    out << "/**\n";
-    out.setLinePrefix(" * ");
-    out << mComment;
+void DocComment::emit(Formatter& out, CommentType type) const {
+    switch (type) {
+        case CommentType::DOC_MULTILINE:
+            out << "/**\n";
+            break;
+        case CommentType::MULTILINE:
+            out << "/*\n";
+            break;
+    }
+
+    out.setLinePrefix(" *");
+
+    for (const std::string& line : mLines) {
+        out << (line.empty() ? "" : " ") << line << "\n";
+    }
+
     out.unsetLinePrefix();
     out << " */\n";
 }

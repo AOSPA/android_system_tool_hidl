@@ -29,6 +29,7 @@
 #include <unistd.h>
 #include <iostream>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -51,8 +52,10 @@ enum class GenerationGranularity {
 struct FileGenerator {
     using ShouldGenerateFunction = std::function<bool(const FQName& fqName)>;
     using FileNameForFQName = std::function<std::string(const FQName& fqName)>;
-    using GenerationFunction = std::function<status_t(Formatter& out, const FQName& fqName,
-                                                      const Coordinator* coordinator)>;
+    using GetFormatter = std::function<Formatter(void)>;
+    using GenerationFunction =
+            std::function<status_t(const FQName& fqName, const Coordinator* coordinator,
+                                   const GetFormatter& getFormatter)>;
 
     ShouldGenerateFunction mShouldGenerateForFqName;  // If generate function applies to this target
     FileNameForFQName mFileNameForFqName;             // Target -> filename
@@ -99,12 +102,9 @@ struct FileGenerator {
             return OK;
         }
 
-        Formatter out = coordinator->getFormatter(fqName, location, getFileName(fqName));
-        if (!out.isValid()) {
-            return UNKNOWN_ERROR;
-        }
-
-        return mGenerationFunction(out, fqName, coordinator);
+        return mGenerationFunction(fqName, coordinator, [&] {
+            return coordinator->getFormatter(fqName, location, getFileName(fqName));
+        });
     }
 
     // Helper methods for filling out this struct
@@ -163,11 +163,11 @@ static status_t appendPerTypeTargets(const FQName& fqName, const Coordinator* co
         return UNKNOWN_ERROR;
     }
 
-    std::vector<NamedType*> rootTypes = typesAST->getRootScope()->getSubTypes();
+    std::vector<NamedType*> rootTypes = typesAST->getRootScope().getSubTypes();
     for (const NamedType* rootType : rootTypes) {
         if (rootType->isTypeDef()) continue;
 
-        FQName rootTypeName(fqName.package(), fqName.version(), "types." + rootType->localName());
+        FQName rootTypeName(fqName.package(), fqName.version(), "types." + rootType->definedName());
         exportedPackageInterfaces->push_back(rootTypeName);
     }
     return OK;
@@ -259,8 +259,8 @@ status_t OutputHandler::writeDepFile(const FQName& fqName, const Coordinator* co
 // Use an AST function as a OutputHandler GenerationFunction
 static FileGenerator::GenerationFunction astGenerationFunction(void (AST::*generate)(Formatter&)
                                                                    const = nullptr) {
-    return [generate](Formatter& out, const FQName& fqName,
-                      const Coordinator* coordinator) -> status_t {
+    return [generate](const FQName& fqName, const Coordinator* coordinator,
+                      const FileGenerator::GetFormatter& getFormatter) -> status_t {
         AST* ast = coordinator->parse(fqName);
         if (ast == nullptr) {
             fprintf(stderr, "ERROR: Could not parse %s. Aborting.\n", fqName.string().c_str());
@@ -268,6 +268,12 @@ static FileGenerator::GenerationFunction astGenerationFunction(void (AST::*gener
         }
 
         if (generate == nullptr) return OK;  // just parsing AST
+
+        Formatter out = getFormatter();
+        if (!out.isValid()) {
+            return UNKNOWN_ERROR;
+        }
+
         (ast->*generate)(out);
 
         return OK;
@@ -283,8 +289,8 @@ static FileGenerator singleFileGenerator(
     };
 }
 
-static status_t generateJavaForPackage(Formatter& out, const FQName& fqName,
-                                       const Coordinator* coordinator) {
+static status_t generateJavaForPackage(const FQName& fqName, const Coordinator* coordinator,
+                                       const FileGenerator::GetFormatter& getFormatter) {
     AST* ast;
     std::string limitToType;
 
@@ -301,6 +307,12 @@ static status_t generateJavaForPackage(Formatter& out, const FQName& fqName,
         fprintf(stderr, "ERROR: Could not parse %s. Aborting.\n", fqName.string().c_str());
         return UNKNOWN_ERROR;
     }
+
+    Formatter out = getFormatter();
+    if (!out.isValid()) {
+        return UNKNOWN_ERROR;
+    }
+
     ast->generateJava(out, limitToType);
     return OK;
 };
@@ -415,9 +427,7 @@ static bool packageNeedsJavaCode(
     // We'll have to generate Java code if types.hal contains any non-typedef
     // type declarations.
 
-    Scope* rootScope = typesAST->getRootScope();
-    std::vector<NamedType *> subTypes = rootScope->getSubTypes();
-
+    std::vector<NamedType*> subTypes = typesAST->getRootScope().getSubTypes();
     for (const auto &subType : subTypes) {
         if (!subType->isTypeDef()) {
             return true;
@@ -455,7 +465,7 @@ bool isHidlTransportPackage(const FQName& fqName) {
 
 bool isSystemProcessSupportedPackage(const FQName& fqName) {
     // Technically, so is hidl IBase + IServiceManager, but
-    // these are part of libhidltransport.
+    // these are part of libhidlbase.
     return fqName.inPackage("android.hardware.graphics.common") ||
            fqName.inPackage("android.hardware.graphics.mapper") ||
            fqName.string() == "android.hardware.renderscript@1.0" ||
@@ -493,14 +503,20 @@ status_t isTestPackage(const FQName& fqName, const Coordinator* coordinator, boo
     return OK;
 }
 
-static status_t generateAdapterMainSource(Formatter& out, const FQName& packageFQName,
-                                          const Coordinator* coordinator) {
+static status_t generateAdapterMainSource(const FQName& packageFQName,
+                                          const Coordinator* coordinator,
+                                          const FileGenerator::GetFormatter& getFormatter) {
     std::vector<FQName> packageInterfaces;
     status_t err =
         coordinator->appendPackageInterfacesToVector(packageFQName,
                                                      &packageInterfaces);
     if (err != OK) {
         return err;
+    }
+
+    Formatter out = getFormatter();
+    if (!out.isValid()) {
+        return UNKNOWN_ERROR;
     }
 
     out << "#include <hidladapter/HidlBinderAdapter.h>\n";
@@ -532,8 +548,9 @@ static status_t generateAdapterMainSource(Formatter& out, const FQName& packageF
     return OK;
 }
 
-static status_t generateAndroidBpForPackage(Formatter& out, const FQName& packageFQName,
-                                            const Coordinator* coordinator) {
+static status_t generateAndroidBpForPackage(const FQName& packageFQName,
+                                            const Coordinator* coordinator,
+                                            const FileGenerator::GetFormatter& getFormatter) {
     CHECK(!packageFQName.isFullyQualified() && packageFQName.name().empty());
 
     std::vector<FQName> packageInterfaces;
@@ -591,6 +608,11 @@ static status_t generateAndroidBpForPackage(Formatter& out, const FQName& packag
     err = coordinator->getPackageRoot(packageFQName, &packageRoot);
     if (err != OK) return err;
 
+    Formatter out = getFormatter();
+    if (!out.isValid()) {
+        return UNKNOWN_ERROR;
+    }
+
     out << "// This file is autogenerated by hidl-gen -Landroidbp.\n\n";
 
     out << "hidl_interface ";
@@ -634,8 +656,9 @@ static status_t generateAndroidBpForPackage(Formatter& out, const FQName& packag
     return OK;
 }
 
-static status_t generateAndroidBpImplForPackage(Formatter& out, const FQName& packageFQName,
-                                                const Coordinator* coordinator) {
+static status_t generateAndroidBpImplForPackage(const FQName& packageFQName,
+                                                const Coordinator* coordinator,
+                                                const FileGenerator::GetFormatter& getFormatter) {
     const std::string libraryName = makeLibraryName(packageFQName) + "-impl";
 
     std::vector<FQName> packageInterfaces;
@@ -662,6 +685,11 @@ static status_t generateAndroidBpImplForPackage(Formatter& out, const FQName& pa
         }
 
         ast->getImportedPackages(&importedPackages);
+    }
+
+    Formatter out = getFormatter();
+    if (!out.isValid()) {
+        return UNKNOWN_ERROR;
     }
 
     out << "// FIXME: your file license if you have one\n\n";
@@ -699,7 +727,6 @@ static status_t generateAndroidBpImplForPackage(Formatter& out, const FQName& pa
             << "shared_libs: [\n";
         out.indent([&] {
             out << "\"libhidlbase\",\n"
-                << "\"libhidltransport\",\n"
                 << "\"libutils\",\n"
                 << "\"" << makeLibraryName(packageFQName) << "\",\n";
 
@@ -770,8 +797,8 @@ bool validateForSource(const FQName& fqName, const Coordinator* coordinator,
 }
 
 FileGenerator::GenerationFunction generateExportHeaderForPackage(bool forJava) {
-    return [forJava](Formatter& out, const FQName& packageFQName,
-                     const Coordinator* coordinator) -> status_t {
+    return [forJava](const FQName& packageFQName, const Coordinator* coordinator,
+                     const FileGenerator::GetFormatter& getFormatter) -> status_t {
         CHECK(!packageFQName.package().empty() && !packageFQName.version().empty() &&
               packageFQName.name().empty());
 
@@ -804,6 +831,7 @@ FileGenerator::GenerationFunction generateExportHeaderForPackage(bool forJava) {
             return OK;
         }
 
+        Formatter out = getFormatter();
         if (!out.isValid()) {
             return UNKNOWN_ERROR;
         }
@@ -852,8 +880,8 @@ FileGenerator::GenerationFunction generateExportHeaderForPackage(bool forJava) {
     };
 }
 
-static status_t generateHashOutput(Formatter& out, const FQName& fqName,
-                                   const Coordinator* coordinator) {
+static status_t generateHashOutput(const FQName& fqName, const Coordinator* coordinator,
+                                   const FileGenerator::GetFormatter& getFormatter) {
     CHECK(fqName.isFullyQualified());
 
     AST* ast = coordinator->parse(fqName, {} /* parsed */,
@@ -865,13 +893,18 @@ static status_t generateHashOutput(Formatter& out, const FQName& fqName,
         return UNKNOWN_ERROR;
     }
 
+    Formatter out = getFormatter();
+    if (!out.isValid()) {
+        return UNKNOWN_ERROR;
+    }
+
     out << Hash::getHash(ast->getFilename()).hexString() << " " << fqName.string() << "\n";
 
     return OK;
 }
 
-static status_t generateFunctionCount(Formatter& out, const FQName& fqName,
-                                      const Coordinator* coordinator) {
+static status_t generateFunctionCount(const FQName& fqName, const Coordinator* coordinator,
+                                      const FileGenerator::GetFormatter& getFormatter) {
     CHECK(fqName.isFullyQualified());
 
     AST* ast = coordinator->parse(fqName, {} /* parsed */,
@@ -885,6 +918,11 @@ static status_t generateFunctionCount(Formatter& out, const FQName& fqName,
     const Interface* interface = ast->getInterface();
     if (interface == nullptr) {
         fprintf(stderr, "ERROR: Function count requires interface: %s.\n", fqName.string().c_str());
+        return UNKNOWN_ERROR;
+    }
+
+    Formatter out = getFormatter();
+    if (!out.isValid()) {
         return UNKNOWN_ERROR;
     }
 
@@ -1229,30 +1267,69 @@ static const std::vector<OutputHandler> kFormats = {
             },
         },
     },
+    {
+        "inheritance-hierarchy",
+        "Prints the hierarchy of inherited types as a JSON object.",
+        OutputMode::NOT_NEEDED,
+        Coordinator::Location::STANDARD_OUT,
+        GenerationGranularity::PER_FILE,
+        validateForSource,
+        {
+            {
+                FileGenerator::alwaysGenerate,
+                nullptr /* file name for fqName */,
+                astGenerationFunction(&AST::generateInheritanceHierarchy),
+            },
+        },
+    },
+    {
+        "format",
+        "Reformats the .hal files",
+        OutputMode::NEEDS_SRC,
+        Coordinator::Location::PACKAGE_ROOT,
+        GenerationGranularity::PER_FILE,
+        validateForSource,
+        {
+            {
+                FileGenerator::alwaysGenerate,
+                [](const FQName& fqName) { return fqName.name() + ".hal"; },
+                astGenerationFunction(&AST::generateFormattedHidl),
+            },
+        }
+    },
 };
 // clang-format on
 
-static void usage(const char *me) {
-    fprintf(stderr,
-            "usage: %s [-p <root path>] -o <output path> -L <language> [-O <owner>] (-r <interface "
-            "root>)+ [-R] [-v] [-d <depfile>] FQNAME...\n\n",
-            me);
+static void usage(const char* me) {
+    Formatter out(stderr);
 
-    fprintf(stderr,
-            "Process FQNAME, PACKAGE(.SUBPACKAGE)*@[0-9]+.[0-9]+(::TYPE)?, to create output.\n\n");
+    out << "Usage: " << me << " -o <output path> -L <language> [-O <owner>] ";
+    Coordinator::emitOptionsUsageString(out);
+    out << " FQNAME...\n\n";
 
-    fprintf(stderr, "         -h: Prints this menu.\n");
-    fprintf(stderr, "         -L <language>: The following options are available:\n");
-    for (auto& e : kFormats) {
-        fprintf(stderr, "            %-16s: %s\n", e.name().c_str(), e.description().c_str());
-    }
-    fprintf(stderr, "         -O <owner>: The owner of the module for -Landroidbp(-impl)?.\n");
-    fprintf(stderr, "         -o <output path>: Location to output files.\n");
-    fprintf(stderr, "         -p <root path>: Android build root, defaults to $ANDROID_BUILD_TOP or pwd.\n");
-    fprintf(stderr, "         -R: Do not add default package roots if not specified in -r.\n");
-    fprintf(stderr, "         -r <package:path root>: E.g., android.hardware:hardware/interfaces.\n");
-    fprintf(stderr, "         -v: verbose output.\n");
-    fprintf(stderr, "         -d <depfile>: location of depfile to write to.\n");
+    out << "Process FQNAME, PACKAGE(.SUBPACKAGE)*@[0-9]+.[0-9]+(::TYPE)?, to create output.\n\n";
+
+    out.indent();
+    out.indent();
+
+    out << "-h: Prints this menu.\n";
+    out << "-L <language>: The following options are available:\n";
+    out.indent([&] {
+        for (auto& e : kFormats) {
+            std::stringstream sstream;
+            sstream.fill(' ');
+            sstream.width(16);
+            sstream << std::left << e.name();
+
+            out << sstream.str() << ": " << e.description() << "\n";
+        }
+    });
+    out << "-O <owner>: The owner of the module for -Landroidbp(-impl)?.\n";
+    out << "-o <output path>: Location to output files.\n";
+    Coordinator::emitOptionsDetailString(out);
+
+    out.unindent();
+    out.unindent();
 }
 
 // hidl is intentionally leaky. Turn off LeakSanitizer by default.
