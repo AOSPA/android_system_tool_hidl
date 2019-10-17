@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 The Android Open Source Project
+ * Copyright (C) 2018 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,14 +13,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package test.line_number_doc_comments@1.0;
 
-package hidl2aidl@2.0;
-
-import @1.0::IFoo;
-
-/* This should go into a package called hidl2aidl2 */
+/**
+ * This is a doc comment
+ */
+/*
+ * Different type of comment
+ */
+// Unhandled comment
 interface IFoo {
-    oneway someFoo(int8_t a);
+    struct A {};
 
-    shouldImportExternalTypes(@1.0::IFoo foo);
+    enum B : uint32_t {
+        C = 2, // bad (A is not an enum)
+        /* more unhandled stuff */
+        /** some more */
+    };
+
+    // The error is on the next line. Should say 35 in the output.
+    foo()
 };
