@@ -80,7 +80,7 @@ struct MethodWithVersion {
 
 static void pushVersionedMethodOntoMap(MethodWithVersion versionedMethod,
                                        std::map<std::string, MethodWithVersion>* map,
-                                       std::vector<const Method*>* ignored) {
+                                       std::vector<const MethodWithVersion*>* ignored) {
     const Method* method = versionedMethod.method;
     std::string name = method->name();
     size_t underscore = name.find("_");
@@ -108,12 +108,12 @@ static void pushVersionedMethodOntoMap(MethodWithVersion versionedMethod,
         if ((current->major > versionedMethod.major) ||
             (current->major == versionedMethod.major && current->minor > versionedMethod.minor)) {
             // ignoring versionedMethod
-            ignored->push_back(versionedMethod.method);
+            ignored->push_back(&versionedMethod);
             return;
         }
 
         // Either current.major < versioned.major OR versioned.minor >= current.minor
-        ignored->push_back(current->method);
+        ignored->push_back(current);
         *current = std::move(versionedMethod);
     }
 }
@@ -148,33 +148,46 @@ void AidlHelper::emitAidl(const Interface& interface, const Coordinator& coordin
         }
 
         std::map<std::string, MethodWithVersion> methodMap;
-        std::vector<const Method*> ignoredMethods;
-        for (const Interface* iface : interface.typeChain()) {
-            const std::vector<Method*> userDefined = iface->userDefinedMethods();
-            for (const Method* method : iface->userDefinedMethods()) {
+        std::vector<const MethodWithVersion*> ignoredMethods;
+        std::vector<std::string> methodNames;
+        std::vector<const Interface*> typeChain = interface.typeChain();
+        for (auto iface = typeChain.rbegin(); iface != typeChain.rend(); ++iface) {
+            for (const Method* method : (*iface)->userDefinedMethods()) {
                 pushVersionedMethodOntoMap(
-                        {iface->fqName().getPackageMajorVersion(),
-                         iface->fqName().getPackageMinorVersion(), method, method->name()},
+                        {(*iface)->fqName().getPackageMajorVersion(),
+                         (*iface)->fqName().getPackageMinorVersion(), method, method->name()},
                         &methodMap, &ignoredMethods);
+                methodNames.push_back(method->name());
             }
         }
 
-        out.join(ignoredMethods.begin(), ignoredMethods.end(), "\n", [&](const Method* method) {
-            out << "// Ignoring method " << method->name()
-                << " since a newer alternative is available.";
-        });
+        std::set<std::string> ignoredMethodNames;
+        out.join(ignoredMethods.begin(), ignoredMethods.end(), "\n",
+                 [&](const MethodWithVersion* versionedMethod) {
+                     out << "// Ignoring method " << versionedMethod->method->name() << " from "
+                         << versionedMethod->major << "." << versionedMethod->minor
+                         << "::" << getAidlName(interface.fqName())
+                         << " since a newer alternative is available.";
+                     ignoredMethodNames.insert(versionedMethod->method->name());
+                 });
         if (!ignoredMethods.empty()) out << "\n\n";
 
-        out.join(methodMap.begin(), methodMap.end(), "\n", [&](const auto& pair) {
-            const Method* method = pair.second.method;
+        out.join(methodNames.begin(), methodNames.end(), "\n", [&](const std::string& name) {
+            const Method* method = methodMap[name].method;
+            if (method == nullptr) {
+                CHECK(ignoredMethodNames.count(name) == 1);
+                return;
+            }
 
             std::vector<NamedReference<Type>*> results;
             std::vector<ResultTransformation> transformations;
             for (NamedReference<Type>* res : method->results()) {
-                if (StringHelper::EndsWith(StringHelper::Uppercase(res->name()), "STATUS") ||
-                    StringHelper::EndsWith(StringHelper::Uppercase(res->name()), "ERROR")) {
-                    out << "// Ignoring result " << getAidlType(*res->get(), interface.fqName())
-                        << " " << res->name() << " since AIDL has built in status types.\n";
+                const std::string aidlType = getAidlType(*res->get(), interface.fqName());
+
+                if (StringHelper::EndsWith(StringHelper::Uppercase(aidlType), "STATUS") ||
+                    StringHelper::EndsWith(StringHelper::Uppercase(aidlType), "ERROR")) {
+                    out << "// Ignoring result " << aidlType << " " << res->name()
+                        << " since AIDL has built in status types.\n";
                     transformations.emplace_back(ResultTransformation{
                             res->name(), ResultTransformation::TransformType::REMOVED});
                 } else {
@@ -182,9 +195,8 @@ void AidlHelper::emitAidl(const Interface& interface, const Coordinator& coordin
                 }
             }
 
-            if (method->name() != pair.second.name) {
-                out << "// Changing method name from " << method->name() << " to "
-                    << pair.second.name << "\n";
+            if (method->name() != name) {
+                out << "// Changing method name from " << method->name() << " to " << name << "\n";
             }
 
             std::string returnType = "void";
@@ -220,7 +232,8 @@ void AidlHelper::emitAidl(const Interface& interface, const Coordinator& coordin
                             transformed = true;
                         } else {
                             CHECK(transform.type == ResultTransformation::TransformType::REMOVED);
-                            tokens.insert(tokens.begin(), "The following return was removed\n");
+                            tokens.insert(tokens.begin(),
+                                          "FIXME: The following return was removed\n");
                             transformed = true;
                         }
                     }
@@ -233,24 +246,25 @@ void AidlHelper::emitAidl(const Interface& interface, const Coordinator& coordin
                     modifiedDocComment.emplace_back(base::Join(tokens, " "));
                 }
 
-                DocComment(base::Join(modifiedDocComment, "\n"), HIDL_LOCATION_HERE).emit(out);
+                DocComment(modifiedDocComment, HIDL_LOCATION_HERE).emit(out);
             }
 
             WrappedOutput wrappedOutput(MAX_LINE_LENGTH);
 
             if (method->isOneway()) wrappedOutput << "oneway ";
-            wrappedOutput << returnType << " " << pair.second.name << "(";
+            wrappedOutput << returnType << " " << name << "(";
 
             if (results.empty()) {
                 emitAidlMethodParams(&wrappedOutput, method->args(), /* prefix */ "in ",
                                      /* attachToLast */ ");\n", interface);
             } else {
-                emitAidlMethodParams(&wrappedOutput, method->args(), /* prefix */ "in ",
-                                     /* attachToLast */ ",", interface);
-                wrappedOutput.printUnlessWrapped(" ");
+                if (!method->args().empty()) {
+                    emitAidlMethodParams(&wrappedOutput, method->args(), /* prefix */ "in ",
+                                         /* attachToLast */ ",", interface);
+                    wrappedOutput.printUnlessWrapped(" ");
+                }
 
                 // TODO: Emit warning if a primitive is given as a out param.
-                if (!method->args().empty()) out << ", ";
                 emitAidlMethodParams(&wrappedOutput, results, /* prefix */ "out ",
                                      /* attachToLast */ ");\n", interface);
             }

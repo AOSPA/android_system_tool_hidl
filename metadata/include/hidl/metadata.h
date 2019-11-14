@@ -14,24 +14,20 @@
  * limitations under the License.
  */
 
-package hidl2aidl@1.0;
+#pragma once
 
-struct Outer {
-    struct Inner {
-        uint8_t a;
-    } inner;
+#include <string>
+#include <vector>
+
+namespace android {
+
+struct HidlInterfaceMetadata {
+    // name of interface, e.g. android.hardware.foo@1.0::IFoo
+    std::string name;
+    // list of inherited names, not including android.hidl.base@1.0::IBase
+    std::vector<std::string> inherited;
+
+    static std::vector<HidlInterfaceMetadata> all();
 };
 
-struct OverrideMe {
-    uint8_t a;
-};
-
-struct OnlyIn10 {
-    string str;
-};
-
-enum Value : uint32_t {
-    A = 1 + 2,
-    B = 7,
-    C,
-};
+}  // namespace android
