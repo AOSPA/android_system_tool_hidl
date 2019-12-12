@@ -14,27 +14,15 @@
  * limitations under the License.
  */
 
-package hidl_java_partial_test@1.0;
+package hidl.tests.vendor@1.1;
 
-struct ExistsInJava {
-    uint32_t happyHippo;
-    uint32_t hippoHappy;
-    memory shmemory;
+import hidl.tests.vendor@1.0::A.B;
+import hidl.tests.vendor@1.0::A;
+
+struct C {
+    vec<B> b;
 };
 
-union UnionDoesNotExistInJava {
-    uint32_t a;
-    uint64_t b;
-};
-
-struct DoesNotExistInJava {
-    UnionDoesNotExistInJava u;
-};
-
-struct DoesNotExistInJavaTransitive {
-    DoesNotExistInJava transative;
-};
-
-struct DoesNotExistInJavaVec {
-    vec<DoesNotExistInJava> avec;
+struct D {
+    vec<A.B> b;
 };
