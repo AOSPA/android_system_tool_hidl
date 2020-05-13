@@ -197,12 +197,13 @@ func (m *allHidlLintsSingleton) MakeVars(ctx android.MakeVarsContext) {
 }
 
 type hidlGenProperties struct {
-	Language   string
-	FqName     string
-	Root       string
-	Interfaces []string
-	Inputs     []string
-	Outputs    []string
+	Language       string
+	FqName         string
+	Root           string
+	Interfaces     []string
+	Inputs         []string
+	Outputs        []string
+	Apex_available []string
 }
 
 type hidlGenRule struct {
@@ -468,6 +469,19 @@ type hidlInterfaceProperties struct {
 	// Whether this interface library should be installed on product partition.
 	// TODO(b/150902910): remove, since this should be an inherited property.
 	Product_specific *bool
+
+	// List of APEX modules this interface can be used in.
+	//
+	// WARNING: HIDL is not fully supported in APEX since VINTF currently doesn't
+	// read files from APEXes (b/130058564).
+	//
+	// "//apex_available:anyapex" is a pseudo APEX name that matches to any APEX.
+	// "//apex_available:platform" refers to non-APEX partitions like "system.img"
+	//
+	// Note, this only applies to C++ libs, Java libs, and Java constant libs. It
+	// does  not apply to VTS targets/adapter targets/fuzzers since these components
+	// should not be shipped on device.
+	Apex_available []string
 }
 
 type hidlInterface struct {
@@ -640,6 +654,8 @@ This corresponds to the "-r%s:<some path>" option that would be passed into hidl
 				"libutils",
 			}),
 			Export_generated_headers: []string{name.headersName()},
+			Apex_available:           i.properties.Apex_available,
+			Min_sdk_version:          getMinSdkVersion(name.string()),
 		}, &i.properties.VndkProperties)
 	}
 
@@ -664,8 +680,9 @@ This corresponds to the "-r%s:<some path>" option that would be passed into hidl
 			// to build framework, which is used to build system_current.  Use core_current
 			// plus hwbinder.stubs, which together form a subset of system_current that does
 			// not depend on framework.
-			Sdk_version: proptools.StringPtr("core_current"),
-			Libs:        []string{"hwbinder.stubs"},
+			Sdk_version:    proptools.StringPtr("core_current"),
+			Libs:           []string{"hwbinder.stubs"},
+			Apex_available: i.properties.Apex_available,
 		}
 
 		mctx.CreateModule(java.LibraryFactory, &javaProperties{
@@ -690,10 +707,11 @@ This corresponds to the "-r%s:<some path>" option that would be passed into hidl
 			Outputs:    []string{name.sanitizedDir() + "Constants.java"},
 		})
 		mctx.CreateModule(java.LibraryFactory, &javaProperties{
-			Name:        proptools.StringPtr(name.javaConstantsName()),
-			Defaults:    []string{"hidl-java-module-defaults"},
-			Sdk_version: proptools.StringPtr("core_current"),
-			Srcs:        []string{":" + name.javaConstantsSourcesName()},
+			Name:           proptools.StringPtr(name.javaConstantsName()),
+			Defaults:       []string{"hidl-java-module-defaults"},
+			Sdk_version:    proptools.StringPtr("core_current"),
+			Srcs:           []string{":" + name.javaConstantsSourcesName()},
+			Apex_available: i.properties.Apex_available,
 		})
 	}
 
@@ -916,6 +934,37 @@ func hidlInterfaceFactory() android.Module {
 	android.AddLoadHook(i, func(ctx android.LoadHookContext) { hidlInterfaceMutator(ctx, i) })
 
 	return i
+}
+
+var minSdkVersion = map[string]string{
+	"android.hardware.cas.native@1.0":           "29",
+	"android.hardware.cas@1.0":                  "29",
+	"android.hardware.graphics.allocator@2.0":   "29",
+	"android.hardware.graphics.allocator@3.0":   "29",
+	"android.hardware.graphics.bufferqueue@1.0": "29",
+	"android.hardware.graphics.bufferqueue@2.0": "29",
+	"android.hardware.graphics.common@1.0":      "29",
+	"android.hardware.graphics.common@1.1":      "29",
+	"android.hardware.graphics.common@1.2":      "29",
+	"android.hardware.graphics.mapper@2.0":      "29",
+	"android.hardware.graphics.mapper@2.1":      "29",
+	"android.hardware.graphics.mapper@3.0":      "29",
+	"android.hardware.media.bufferpool@2.0":     "29",
+	"android.hardware.media.c2@1.0":             "29",
+	"android.hardware.media.omx@1.0":            "29",
+	"android.hardware.media@1.0":                "29",
+	"android.hidl.allocator@1.0":                "29",
+	"android.hidl.memory.token@1.0":             "29",
+	"android.hidl.memory@1.0":                   "29",
+	"android.hidl.safe_union@1.0":               "29",
+	"android.hidl.token@1.0":                    "29",
+}
+
+func getMinSdkVersion(name string) *string {
+	if ver, ok := minSdkVersion[name]; ok {
+		return proptools.StringPtr(ver)
+	}
+	return nil
 }
 
 var doubleLoadablePackageNames = []string{
